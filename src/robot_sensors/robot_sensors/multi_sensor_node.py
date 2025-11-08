@@ -110,7 +110,7 @@ class MultiSensorBridge(Node):
         self.create_subscription(Bool, '/brush/main/cmd', self.handle_brush_main_cmd, 10)
         self.create_subscription(Bool, '/brush/left/cmd', self.handle_brush_left_cmd, 10)
         self.create_subscription(Bool, '/brush/right/cmd', self.handle_brush_right_cmd, 10)
-        self.create_subscription(String, '/motor/manual_pwm', self.handle_motor_pwm, 10)
+        self.create_subscription(String, '/motor/pwm', self.handle_motor_pwm, 10)  # Changed from manual_pwm
 
         # Open serial connection
         self.get_logger().info(f"Opening {port} @ {baud}")

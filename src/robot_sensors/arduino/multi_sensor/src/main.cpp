@@ -215,7 +215,7 @@ void setup() {
 
   // Setup safety / auxiliary IO
   pinMode(ESTOP_MAIN_PIN, INPUT_PULLUP);    // NC switch, use pull-up so LOW when pressed
-  pinMode(FRONT_STOP_PIN, INPUT);           // NO switch, assume external pulldown
+  pinMode(FRONT_STOP_PIN, INPUT_PULLUP);    // NO switch with pull-up, will be LOW when pressed
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(RELAY_VACUUM_PIN, OUTPUT);
@@ -263,9 +263,14 @@ void readAllSensors() {
   int ir_bleft_stair = digitalRead(IR_BLEFT_STAIR);
 
   // Read emergency/bumper switches
-  bool estop_main_active = (digitalRead(ESTOP_MAIN_PIN) == LOW);    // NC, LOW when pressed
-  bool front_stop_active = (digitalRead(FRONT_STOP_PIN) == HIGH);   // NO, HIGH when pressed
+  // Pin 22 (ESTOP_MAIN_PIN): NC switch - reads HIGH (1) when safe, LOW (0) when triggered
+  // Pin 24 (FRONT_STOP_PIN): NO switch - reads LOW (0) when safe, HIGH (1) when pressed
+  int pin22_state = digitalRead(ESTOP_MAIN_PIN);
+  int pin24_state = digitalRead(FRONT_STOP_PIN);
+  bool estop_main_active = (pin22_state == LOW);    // NC: LOW when emergency triggered
+  bool front_stop_active = (pin24_state == HIGH);   // NO: HIGH when bumper pressed
 
+  // Safety lock is active if ANY emergency condition is true
   safety_lock_active = estop_main_active || front_stop_active;
   if (!safety_lock_active) {
     if (safety_lock_released_at == 0) {
@@ -349,8 +354,9 @@ void readAllSensors() {
   Serial.print(enc_right);
 
   Serial.print("|ESTOP:");
-  Serial.print(estop_main_active ? 1 : 0); Serial.print(",");
-  Serial.print(front_stop_active ? 1 : 0);
+  Serial.print(pin22_state); Serial.print(",");
+  Serial.print(pin24_state); Serial.print(",");
+  Serial.print(safety_lock_active ? 1 : 0);
 
   Serial.print("|BAT:");
   Serial.print(batt_voltage_raw); Serial.print(",");
@@ -415,7 +421,11 @@ void processCommand(String cmd) {
       motor_left_pwm = cmd.substring(0, comma_pos).toInt();
       motor_right_pwm = cmd.substring(comma_pos + 1).toInt();
 
-      // Apply motor commands
+      // Apply motor commands ONLY if safety is not active
+      if (safety_lock_active) {
+        motor_left_pwm = 0;
+        motor_right_pwm = 0;
+      }
       setMotor(MOTOR_LEFT_RPWM, MOTOR_LEFT_LPWM, motor_left_pwm);
       setMotor(MOTOR_RIGHT_RPWM, MOTOR_RIGHT_LPWM, motor_right_pwm);
     }

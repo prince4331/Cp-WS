@@ -28,6 +28,9 @@ class MotorController(Node):
         self.cmd_vel_sub = self.create_subscription(
             Twist, '/cmd_vel', self.cmd_vel_callback, 10)
 
+        # Publisher for motor PWM commands (to multi_sensor_node)
+        self.motor_pwm_pub = self.create_publisher(String, '/motor/pwm', 10)
+        
         # Publisher for motor status
         self.status_pub = self.create_publisher(String, '/motor/status', 10)
 
@@ -71,6 +74,12 @@ class MotorController(Node):
         return max(-255, min(255, pwm))
 
     def send_motor_command(self, left_pwm, right_pwm):
+        # Send PWM commands to multi_sensor_node
+        pwm_msg = String()
+        pwm_msg.data = f"{left_pwm},{right_pwm}"
+        self.motor_pwm_pub.publish(pwm_msg)
+        
+        # Publish status
         status_msg = String()
         status_msg.data = f"L:{left_pwm} R:{right_pwm}"
         self.status_pub.publish(status_msg)
