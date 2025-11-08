@@ -1,0 +1,280 @@
+┌─────────────────────────────────────────────────────────────────────┐
+│            🤖 SENSOR DASHBOARD - COMPLETE SETUP GUIDE               │
+└─────────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                         TERMINAL LAYOUT                           ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+You'll need TWO terminals open:
+
+┌─────────────────────────────────┬────────────────────────────────┐
+│     TERMINAL 1 (Robot System)   │   TERMINAL 2 (Dashboard)       │
+├─────────────────────────────────┼────────────────────────────────┤
+│                                 │                                │
+│  $ cd /home/saad/clean_ws       │  $ cd /home/saad/clean_ws      │
+│  $ source install/setup.bash    │  $ ./dashboard.sh              │
+│  $ ros2 launch robot_sensors \  │                                │
+│    complete_robot_launch.py     │  ┌──────────────────────────┐  │
+│                                 │  │  🤖 DASHBOARD DISPLAY    │  │
+│  [INFO] Starting nodes...       │  │  ────────────────────────│  │
+│  [INFO] sllidar_node started    │  │  📏 ULTRASONIC SENSORS   │  │
+│  [INFO] multi_sensor_node OK    │  │    front     : 125.3 cm  │  │
+│  [INFO] odometry_node OK        │  │    left      :  80.5 cm  │  │
+│  [INFO] motor_controller OK     │  │  🔴 IR OBJECT DETECTION  │  │
+│  [INFO] tf_publisher OK         │  │    front     : Clear     │  │
+│                                 │  │  ⚙️  ENCODERS            │  │
+│  (System running, don't close)  │  │    Left:  12345          │  │
+│                                 │  │  🧭 ODOMETRY             │  │
+│                                 │  │    X: 0.534 m            │  │
+│                                 │  └──────────────────────────┘  │
+└─────────────────────────────────┴────────────────────────────────┘
+
+Optional TERMINAL 3 for testing movement:
+┌────────────────────────────────────────────────────────────────────┐
+│  $ cd /home/saad/clean_ws                                          │
+│  $ source install/setup.bash                                       │
+│  $ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \               │
+│      "{linear: {x: 0.1}}" --once                                   │
+│  # Watch dashboard update with movement!                           │
+└────────────────────────────────────────────────────────────────────┘
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                     STEP-BY-STEP WORKFLOW                         ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+STEP 1: Check Hardware Connections
+  ✓ Arduino Mega plugged into USB (should be /dev/ttyACM0)
+  ✓ LIDAR plugged into USB (should be /dev/ttyUSB0)
+  ✓ All sensors connected to Arduino pins
+  ✓ Power supply connected
+
+  Verify:
+    ls -l /dev/ttyACM* /dev/ttyUSB*
+    # Should see both devices
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 2: Open Terminal 1 - Start Robot System
+  cd /home/saad/clean_ws
+  source install/setup.bash
+  ros2 launch robot_sensors complete_robot_launch.py
+
+  Wait for these messages:
+    [INFO] [launch]: All nodes started
+    [INFO] sllidar_node-1 started
+    [INFO] multi_sensor_node-2 started
+    [INFO] odometry_node-3 started
+    [INFO] motor_controller_node-4 started
+    [INFO] robot_tf_publisher-5 started
+
+  DO NOT CLOSE THIS TERMINAL!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 3: Open Terminal 2 - Launch Dashboard
+  cd /home/saad/clean_ws
+  ./dashboard.sh
+
+  Dashboard should appear full-screen showing:
+    ✓ Ultrasonic sensor distances
+    ✓ IR sensor states
+    ✓ Encoder counts
+    ✓ Odometry data
+    ✓ LIDAR statistics
+
+  If you see all "---" values:
+    → Robot system not running or not connected
+    → Go back to Terminal 1 and check for errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 4: Verify Sensors Working
+
+  Test Ultrasonic:
+    1. Look at dashboard ultrasonic values
+    2. Move your hand near a sensor
+    3. Distance should decrease on dashboard
+    4. GREEN should turn RED when < 10 cm
+
+  Test IR Object Detection:
+    1. Look at dashboard IR object section
+    2. Place object near IR sensor
+    3. "Clear" should change to "DETECTED"
+    4. Color should change GREEN → RED
+
+  Test IR Stair Detection:
+    1. Look at dashboard IR stair section
+    2. Should show "Safe" normally
+    3. If sensor detects edge/stair: shows "STAIR!" in RED
+
+  Test Encoders (need wheels):
+    1. Look at dashboard encoder values
+    2. Manually turn a wheel
+    3. Encoder count should increment
+    4. Both wheels should increment when robot moves
+
+  Test LIDAR:
+    1. Look at dashboard LIDAR section
+    2. Should show ~360 points
+    3. Min/Max range should update
+    4. Scan time should be ~5-10 ms
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 5: Test Robot Movement (Optional)
+
+  Open Terminal 3:
+    cd /home/saad/clean_ws
+    source install/setup.bash
+
+  Send movement command:
+    ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+      "{linear: {x: 0.1}}" --once
+
+  Watch dashboard for changes:
+    ✓ Lin V should show 0.100 m/s
+    ✓ X position should start increasing
+    ✓ Encoder values should increment
+    ✓ Angular velocity should be 0.000
+
+  Stop robot:
+    ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{}" --once
+
+  Turn robot:
+    ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+      "{angular: {z: 0.5}}" --once
+
+  Watch dashboard:
+    ✓ Ang V should show 0.500 rad/s
+    ✓ Theta (heading) should change
+    ✓ Encoders should show different speeds
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STEP 6: Shutdown
+
+  Close Dashboard (Terminal 2):
+    Press 'q'
+
+  Stop Robot System (Terminal 1):
+    Press Ctrl+C
+    Wait for clean shutdown
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                         TROUBLESHOOTING                           ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+PROBLEM: Dashboard shows all "---"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   Robot system not running or topics not publishing
+  FIX:     
+    1. Check Terminal 1 for errors
+    2. Verify: ros2 topic list
+       Should see 24 topics
+    3. Verify: ros2 topic hz /ultrasonic/front
+       Should show ~10 Hz
+    4. Check Arduino connection: ls -l /dev/ttyACM0
+    5. Restart robot system if needed
+
+PROBLEM: Dashboard looks garbled/broken
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   Terminal window too small
+  FIX:     Resize terminal to at least 100 columns x 30 rows
+           Or use fullscreen: F11
+
+PROBLEM: No colors showing
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   Terminal doesn't support colors
+  FIX:     export TERM=xterm-256color
+           Then relaunch dashboard
+
+PROBLEM: Ultrasonic always shows max value
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   Sensor not connected or faulty
+  FIX:     
+    1. Check sensor wiring
+    2. Verify Arduino code uploaded: pio run --target upload
+    3. Check serial output: ros2 topic echo /sensors/raw
+
+PROBLEM: Encoders not incrementing
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   Encoder not connected or wheels not moving
+  FIX:     
+    1. Manually turn wheel and watch dashboard
+    2. Check encoder wiring
+    3. Verify interrupt pins correct
+
+PROBLEM: LIDAR shows 0 points
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   LIDAR not connected or not spinning
+  FIX:     
+    1. Check USB connection: ls -l /dev/ttyUSB0
+    2. Check LIDAR power (should be spinning)
+    3. Restart robot system
+
+PROBLEM: Dashboard crashes immediately
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CAUSE:   Missing Python dependencies
+  FIX:     
+    1. Verify package built: colcon build --packages-select robot_sensors
+    2. Source setup: source install/setup.bash
+    3. Check for errors: ros2 run robot_sensors sensor_dashboard
+
+╔═══════════════════════════════════════════════════════════════════╗
+║                         QUICK REFERENCE                           ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Start Everything:
+  Terminal 1: ros2 launch robot_sensors complete_robot_launch.py
+  Terminal 2: ./dashboard.sh
+
+Stop Everything:
+  Terminal 2: Press 'q'
+  Terminal 1: Press Ctrl+C
+
+Check System Status:
+  ./show_status.sh
+
+View All Commands:
+  ./quick_start.sh
+
+Get Help:
+  cat DASHBOARD_README.md
+  cat DASHBOARD_CHEATSHEET.txt
+
+Test Topics:
+  ros2 topic list              # List all topics
+  ros2 topic hz /odom          # Check update rate
+  ros2 topic echo /scan        # See raw data
+
+Emergency Stop Robot:
+  ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{}" --once
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                    📋 CHECKLIST BEFORE STARTING
+
+  Hardware:
+    ☐ Arduino Mega connected (check /dev/ttyACM0)
+    ☐ LIDAR connected (check /dev/ttyUSB0)
+    ☐ All sensors wired correctly
+    ☐ Power supply connected
+
+  Software:
+    ☐ Package built (colcon build)
+    ☐ setup.bash sourced in each terminal
+    ☐ Arduino code uploaded (pio run --target upload)
+
+  Terminal Setup:
+    ☐ Terminal 1 ready for robot system
+    ☐ Terminal 2 ready for dashboard
+    ☐ Terminal size at least 100x30
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                      🎉 YOU'RE READY TO GO! 🎉
+
+                     Start with: ./dashboard.sh
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
