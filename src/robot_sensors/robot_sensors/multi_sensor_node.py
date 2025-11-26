@@ -30,15 +30,18 @@ class MultiSensorBridge(Node):
         # Declare parameters
         self.declare_parameter('port', '/dev/ttyACM0')
         self.declare_parameter('baud', 115200)
-        self.declare_parameter('battery_voltage_scale', 0.01995)  # volts per ADC count (24V divider 19.1k/6.2k)
+        self.declare_parameter('battery_voltage_scale', 0.0254)  # volts per ADC count (26V battery calibrated)
         self.declare_parameter('battery_voltage_offset', 0.0)
-        self.declare_parameter('battery_current_scale', 0.001)      # amps per ADC count
+        self.declare_parameter('battery_current_scale', 0.001)      # amps per ADC count (adjust if needed)
         self.declare_parameter('battery_current_offset', 0.0)
         self.declare_parameter('battery_temp_scale', 0.1)           # degC per ADC count
         self.declare_parameter('battery_temp_offset', 0.0)
         self.declare_parameter('imu_frame_id', 'imu_link')
         self.declare_parameter('water_clean_frame', 'water_clean_level')
         self.declare_parameter('water_dirty_frame', 'water_dirty_level')
+        # Encoder sign inversion (useful if Arduino ISR decrements counts)
+        self.declare_parameter('encoder_left_invert', True)
+        self.declare_parameter('encoder_right_invert', True)
 
         port = self.get_parameter('port').value
         baud = self.get_parameter('baud').value
@@ -52,7 +55,9 @@ class MultiSensorBridge(Node):
         self.water_clean_frame = str(self.get_parameter('water_clean_frame').value)
         self.water_dirty_frame = str(self.get_parameter('water_dirty_frame').value)
 
-        # Create publishers for ultrasonic sensors (obstacle array)
+        # Encoder inversion flags (read after declaration)
+        self.encoder_left_invert = bool(self.get_parameter('encoder_left_invert').value)
+        self.encoder_right_invert = bool(self.get_parameter('encoder_right_invert').value)        # Create publishers for ultrasonic sensors (obstacle array)
         self.pub_us_front = self.create_publisher(Range, '/ultrasonic/front', 10)
         self.pub_us_fright = self.create_publisher(Range, '/ultrasonic/front_right', 10)
         self.pub_us_fleft = self.create_publisher(Range, '/ultrasonic/front_left', 10)
@@ -93,9 +98,15 @@ class MultiSensorBridge(Node):
         self.pub_brush_main_state = self.create_publisher(Bool, '/brush/main/state', 10)
         self.pub_brush_left_state = self.create_publisher(Bool, '/brush/left/state', 10)
         self.pub_brush_right_state = self.create_publisher(Bool, '/brush/right/state', 10)
+        
+        # Relay status publisher for cleaning systems
+        self.pub_relay_status = self.create_publisher(String, '/relay/status', 10)
 
-        # Raw data publisher for debugging
-        self.pub_raw = self.create_publisher(String, '/sensors/raw', 10)
+        # Raw data publisher for debugging (DISABLED - data already published to specific topics)
+        # self.pub_raw = self.create_publisher(String, '/sensors/raw', 10)
+        
+        # Track relay states
+        self.relay_states = {1: False, 2: False, 3: False, 4: False}
 
         # Command subscribers for auxiliary outputs
         self.last_buzzer_cmd: Optional[bool] = None
@@ -105,21 +116,39 @@ class MultiSensorBridge(Node):
         self.last_brush_left_cmd: Optional[bool] = None
         self.last_brush_right_cmd: Optional[bool] = None
         self.create_subscription(Bool, '/buzzer/cmd', self.handle_buzzer_cmd, 10)
+        self.create_subscription(String, '/arduino_buzzer', self.handle_arduino_buzzer, 10)  # For buzzer controller
         self.create_subscription(Bool, '/indicator/cmd', self.handle_led_cmd, 10)
         self.create_subscription(Bool, '/vacuum/cmd', self.handle_vacuum_cmd, 10)
         self.create_subscription(Bool, '/brush/main/cmd', self.handle_brush_main_cmd, 10)
         self.create_subscription(Bool, '/brush/left/cmd', self.handle_brush_left_cmd, 10)
         self.create_subscription(Bool, '/brush/right/cmd', self.handle_brush_right_cmd, 10)
         self.create_subscription(String, '/motor/pwm', self.handle_motor_pwm, 10)  # Changed from manual_pwm
+        self.create_subscription(String, '/relay/command', self.handle_relay_cmd, 10)  # Relay control for cleaning systems
 
         # Open serial connection
         self.get_logger().info(f"Opening {port} @ {baud}")
-        self.ser = serial.Serial(port, baudrate=baud, timeout=1)
+        self.ser = serial.Serial(port, baudrate=baud, timeout=0.05)  # 50ms timeout - non-blocking for fast reads
         self.serial_write_lock = threading.Lock()
-        time.sleep(2.0)  # Allow Arduino reset
+        self.get_logger().info("Waiting for Arduino to boot (IMU initialization)...")
+        time.sleep(5.0)  # Wait for Arduino reset + IMU initialization
+        
+        # Clear any garbage from initialization
+        self.ser.reset_input_buffer()
+        
+        # Read and discard a few lines to ensure we're synchronized
+        self.get_logger().info("Synchronizing with Arduino serial stream...")
+        for i in range(5):
+            try:
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                if line:
+                    self.get_logger().info(f"Sync read {i+1}: {line[:80]}")
+            except Exception:
+                pass
+        
+        self.get_logger().info("Serial buffer cleared and synchronized, ready to read")
 
         # Create timer for reading sensor data
-        self.timer = self.create_timer(0.05, self.read_sensors)  # 20 Hz
+        self.timer = self.create_timer(0.1, self.read_sensors)  # 10 Hz - matches Arduino output rate
 
         self.get_logger().info("Multi-Sensor Bridge initialized - sensors + aux IO ready")
 
@@ -144,6 +173,17 @@ class MultiSensorBridge(Node):
             return
         self.last_buzzer_cmd = msg.data
         self.send_aux_command(f"BZ:{1 if msg.data else 0}")
+    
+    def handle_arduino_buzzer(self, msg: String) -> None:
+        """Handle buzzer commands from buzzer_controller (B:0 or B:1 format)"""
+        command = msg.data.strip()
+        if command.startswith('B:'):
+            try:
+                value = int(command.split(':')[1])
+                self.last_buzzer_cmd = bool(value)
+                self.send_aux_command(f"BZ:{value}")
+            except (IndexError, ValueError) as e:
+                self.get_logger().warn(f"Invalid arduino buzzer command: {command}")
 
     def handle_led_cmd(self, msg: Bool) -> None:
         if self.last_led_cmd == msg.data:
@@ -178,6 +218,53 @@ class MultiSensorBridge(Node):
         except Exception as exc:
             self.get_logger().warn(f"Failed to send motor command: {exc}")
 
+    def handle_relay_cmd(self, msg: String) -> None:
+        """
+        Handle relay control commands for cleaning systems
+        Format: "relay_number,state" (e.g., "1,1" for relay 1 ON)
+        Relay 1: Vacuum Pump
+        Relay 2: Scrubber
+        Relay 3: Sweeping Brush
+        Relay 4: Water Pump
+        """
+        data = msg.data.strip()
+        if not data:
+            return
+        
+        parts = data.split(',')
+        if len(parts) != 2:
+            self.get_logger().warn(f"Invalid relay command format: {data}")
+            return
+        
+        try:
+            relay_num = int(parts[0])
+            state = int(parts[1])
+            
+            if relay_num < 1 or relay_num > 4:
+                self.get_logger().warn(f"Invalid relay number: {relay_num} (must be 1-4)")
+                return
+            
+            if state not in [0, 1]:
+                self.get_logger().warn(f"Invalid relay state: {state} (must be 0 or 1)")
+                return
+            
+            # Send relay command to Arduino
+            command = f"RELAY:{relay_num},{state}"
+            self.send_aux_command(command)
+            
+            # Update relay state and publish status
+            self.relay_states[relay_num] = (state == 1)
+            status_msg = String()
+            status_msg.data = f"{relay_num},{state}"
+            self.pub_relay_status.publish(status_msg)
+            
+            relay_names = {1: "Vacuum Pump", 2: "Scrubber", 3: "Sweeping Brush", 4: "Water Pump"}
+            state_str = "ON" if state == 1 else "OFF"
+            self.get_logger().info(f"Relay {relay_num} ({relay_names.get(relay_num, 'Unknown')}) set to {state_str}")
+            
+        except ValueError:
+            self.get_logger().warn(f"Invalid relay command values: {data}")
+
     def handle_vacuum_cmd(self, msg: Bool) -> None:
         if self.last_vacuum_cmd == msg.data:
             return
@@ -210,12 +297,25 @@ class MultiSensorBridge(Node):
             return
 
         if not line:
+            # Log empty reads occasionally for debugging
+            if not hasattr(self, '_empty_count'):
+                self._empty_count = 0
+            self._empty_count += 1
+            if self._empty_count % 100 == 0:
+                self.get_logger().warn(f"Serial read returned empty {self._empty_count} times")
             return
 
-        # Publish raw data for logging/diagnostics
-        raw_msg = String()
-        raw_msg.data = line
-        self.pub_raw.publish(raw_msg)
+        # DEBUG: Log every 10th line to see what we're receiving (DISABLED for production)
+        # if not hasattr(self, '_line_count'):
+        #     self._line_count = 0
+        # self._line_count += 1
+        # if self._line_count % 10 == 0:
+        #     self.get_logger().info(f"DEBUG: Received line {self._line_count}: {line[:100]}...")
+
+        # Publish raw data for logging/diagnostics (DISABLED - redundant)
+        # raw_msg = String()
+        # raw_msg.data = line
+        # self.pub_raw.publish(raw_msg)
 
         parts = line.split('|')
         data_map: Dict[str, str] = {}
@@ -270,20 +370,45 @@ class MultiSensorBridge(Node):
 
     def publish_range(self, publisher, frame_id: str, distance_cm: float, timestamp) -> None:
         """Helper to publish a Range message if distance is valid."""
+        # DEBUG: Log entry (DISABLED for production - too verbose)
+        # if not hasattr(self, '_publish_range_calls'):
+        #     self._publish_range_calls = 0
+        # self._publish_range_calls += 1
+        # if self._publish_range_calls % 50 == 0:
+        #     self.get_logger().info(f"DEBUG: publish_range called {self._publish_range_calls} times, frame={frame_id}, distance={distance_cm}cm")
+        
         if distance_cm <= 0:
             return
-        msg = Range()
-        msg.header.stamp = timestamp
-        msg.header.frame_id = frame_id
-        msg.radiation_type = Range.ULTRASOUND
-        msg.field_of_view = 0.26
-        msg.min_range = 0.02
-        msg.max_range = 4.0
-        msg.range = distance_cm / 100.0  # cm → meters
-        publisher.publish(msg)
+        try:
+            msg = Range()
+            msg.header.stamp = timestamp
+            msg.header.frame_id = frame_id
+            msg.radiation_type = Range.ULTRASOUND
+            msg.field_of_view = 0.26
+            msg.min_range = 0.02
+            msg.max_range = 4.0
+            msg.range = distance_cm / 100.0  # cm → meters
+            publisher.publish(msg)
+            # DEBUG
+            if not hasattr(self, '_range_pub_count'):
+                self._range_pub_count = {}
+            if frame_id not in self._range_pub_count:
+                self._range_pub_count[frame_id] = 0
+            self._range_pub_count[frame_id] += 1
+            if self._range_pub_count[frame_id] == 10:
+                self.get_logger().info(f"DEBUG: Published 10 Range messages for {frame_id}, distance={msg.range:.2f}m")
+        except Exception as e:
+            self.get_logger().error(f"ERROR publishing range for {frame_id}: {e}")
 
     def publish_ultrasonic(self, distances: List[float], timestamp) -> None:
         """Publish obstacle ultrasonic array."""
+        # DEBUG (DISABLED for production - too verbose)
+        # if not hasattr(self, '_us_pub_count'):
+        #     self._us_pub_count = 0
+        # self._us_pub_count += 1
+        # if self._us_pub_count % 20 == 0:
+        #     self.get_logger().info(f"DEBUG: Publishing ultrasonic distances: {distances}")
+        
         mapping = [
             (self.pub_us_front, 'ultrasonic_front'),
             (self.pub_us_fright, 'ultrasonic_front_right'),
@@ -357,6 +482,12 @@ class MultiSensorBridge(Node):
         except ValueError:
             return
 
+        # Apply optional inversion if Arduino increments/decrements in opposite sign
+        if self.encoder_left_invert:
+            left_count = -left_count
+        if self.encoder_right_invert:
+            right_count = -right_count
+
         msg_left = Int32()
         msg_left.data = left_count
         self.pub_enc_left.publish(msg_left)
@@ -403,7 +534,25 @@ class MultiSensorBridge(Node):
         batt_msg.voltage = raw_voltage * self.batt_voltage_scale + self.batt_voltage_offset
         batt_msg.current = raw_current * self.batt_current_scale + self.batt_current_offset
         batt_msg.temperature = raw_temp * self.batt_temp_scale + self.batt_temp_offset
-        batt_msg.percentage = nan
+        
+        # Debug: Log raw ADC values (DISABLED - only log scaled values)
+        # self.get_logger().info(f'Battery RAW ADC: voltage={raw_voltage:.0f}, current={raw_current:.0f}, temp={raw_temp:.0f}')
+        
+        # Log scaled values every 10 seconds instead of every reading
+        if not hasattr(self, '_batt_log_count'):
+            self._batt_log_count = 0
+        self._batt_log_count += 1
+        if self._batt_log_count % 100 == 0:  # ~10 seconds at 10Hz
+            self.get_logger().info(f'Battery: {batt_msg.voltage:.2f}V, {batt_msg.current:.2f}A, {batt_msg.temperature:.1f}°C')
+        
+        # Calculate battery percentage for 26V lead-acid battery (6S 21V-25.2V typical range)
+        # Full: 25.2V (100%), Empty: 21.0V (0%)
+        voltage_min = 21.0
+        voltage_max = 26.5
+        percentage = ((batt_msg.voltage - voltage_min) / (voltage_max - voltage_min)) * 100.0
+        percentage = max(0.0, min(100.0, percentage))  # Clamp between 0-100%
+        batt_msg.percentage = percentage
+        
         batt_msg.charge = nan
         batt_msg.capacity = nan
         batt_msg.design_capacity = nan

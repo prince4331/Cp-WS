@@ -1,0 +1,13 @@
+Metadata-Version: 2.1
+Name: robot-sensors
+Version: 0.1.0
+Summary: Multi-sensor ROS 2 bridge for autonomous floor cleaning robot: 5x Ultrasonic, 8x IR, 2x Encoder sensors
+Home-page: UNKNOWN
+Maintainer: saad
+Maintainer-email: saad@todo.todo
+License: MIT
+Platform: UNKNOWN
+Provides-Extra: test
+
+UNKNOWN
+

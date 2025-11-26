@@ -1,54 +1,57 @@
-// Multi-Sensor Arduino Mega → ROS Bridge
 // Autonomous Floor Cleaning Robot - All Sensors + Motor Control
 // Sensors: 7x Ultrasonic (obstacle + tank levels), 8x IR (4 object + 4 stair),
-//          2x Encoders, Emergency Stops, Battery telemetry, BNO055 IMU
+//          2x Encoders, Emergency Stops, INA219 (battery V/I), DHT11 (temp), BNO055 IMU
 // Actuators: 2x BTS7960 motor drivers, buzzer, status LED
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
+#include <Adafruit_INA219.h>
+#include <DHT.h>
 
 // ============= ULTRASONIC SENSOR PINS (HC-SR04) =============
 // Obstacle array trigger pins
 #define US_FRONT_TRIG   44
 #define US_FRIGHT_TRIG  42
-#define US_FLEFT_TRIG   40
+#define US_FLEFT_TRIG   36
 #define US_RIGHT_TRIG   38
-#define US_LEFT_TRIG    36
+#define US_LEFT_TRIG    32  // SWAPPED: Now using pins 32-33 for LEFT obstacle
 
 // Obstacle array echo pins
 #define US_FRONT_ECHO   45
 #define US_FRIGHT_ECHO  43
-#define US_FLEFT_ECHO   41
+#define US_FLEFT_ECHO   37
 #define US_RIGHT_ECHO   39
-#define US_LEFT_ECHO    37
+#define US_LEFT_ECHO    33  // SWAPPED: Now using pins 32-33 for LEFT obstacle
 
 // Water level sensors (clean & dirty tanks)
 #define US_CLEAN_TRIG   34
 #define US_CLEAN_ECHO   35
-#define US_DIRTY_TRIG   32
-#define US_DIRTY_ECHO   33
-
+#define US_DIRTY_TRIG   40  // SWAPPED: Now using pins 40-41 for DIRTY WATER
+#define US_DIRTY_ECHO   41  // SWAPPED: Now using pins 40-41 for DIRTY WATER  
 // ============= SAFETY & AUXILIARY IO =============
-#define ESTOP_MAIN_PIN    22   // Main emergency stop (NC -> LOW when pressed)
+#define ESTOP_MAIN_PIN    22   // Main emergency stop (NO -> HIGH when pressed)
 #define FRONT_STOP_PIN    24   // Front bumper/pressure switch (NO -> HIGH when pressed)
 #define BUZZER_PIN        26   // Buzzer output
 #define STATUS_LED_PIN    28   // Status LED output
 
 // Relay polarity: set to true if your relay turns ON when driven HIGH.
-const bool RELAY_ACTIVE_HIGH = false;
+const bool RELAY_ACTIVE_HIGH = false;  // Relays are active-LOW (ON when pin is LOW)
 
-// Relay outputs
-#define RELAY_VACUUM_PIN      30
-#define RELAY_BRUSH_MAIN_PIN  31
-#define RELAY_BRUSH_LEFT_PIN  27
-#define RELAY_BRUSH_RIGHT_PIN 29
+// Output pins
+#define RELAY_BRUSH_MAIN_PIN  30  // Scrubber (relay - active LOW)
+#define VACUUM_PIN            31  // Vacuum Pump (direct connection - normally LOW, HIGH when ON)
+#define RELAY_BRUSH_LEFT_PIN  27  // Sweeping Brush (relay - active LOW)
+#define RELAY_BRUSH_RIGHT_PIN 29  // Water Pump (relay - active LOW)
 
-// ============= BATTERY SENSORS (ANALOG) =============
-#define BATTERY_VOLT_PIN   A0
-#define BATTERY_CURR_PIN   A1
-#define BATTERY_TEMP_PIN   A2
+// ============= BATTERY SENSORS =============
+// Analog pins for battery monitoring
+#define BATTERY_VOLTAGE_PIN  A0  // Battery voltage sensor
+#define BATTERY_CURRENT_PIN  A1  // Battery current sensor
+// DHT11 temperature sensor digital pin
+#define DHT_PIN              A2  // DHT11 data pin (temperature)
+#define DHT_TYPE             DHT11    // DHT sensor type
 
 // ============= IR SENSOR PINS =============
 // Object detection IR sensors (digital)
@@ -68,8 +71,9 @@ const bool RELAY_ACTIVE_HIGH = false;
 #define ENCODER_RIGHT   2
 
 // ============= MOTOR DRIVER PINS (BTS7960) =============
-#define MOTOR_RIGHT_RPWM  6
-#define MOTOR_RIGHT_LPWM  7
+// RIGHT MOTOR: SWAPPED RPWM and LPWM to invert direction
+#define MOTOR_RIGHT_RPWM  7  // Swapped: was 6
+#define MOTOR_RIGHT_LPWM  6  // Swapped: was 7
 #define MOTOR_LEFT_RPWM   4
 #define MOTOR_LEFT_LPWM   5
 
@@ -91,6 +95,12 @@ boolean stringComplete = false;
 Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
 bool imu_available = false;
 
+// Battery monitoring (INA219 + DHT11)
+Adafruit_INA219 ina219;
+DHT dht(DHT_PIN, DHT_TYPE);
+bool ina219_available = false;
+bool dht_available = false;
+
 // Output states
 bool buzzer_requested = false;
 bool led_requested = false;
@@ -107,6 +117,12 @@ bool brush_right_active = false;
 bool safety_lock_active = false;
 unsigned long safety_lock_released_at = 0;
 const unsigned long SAFETY_DEBOUNCE_MS = 200;  // require this long of clear signal before restoring outputs
+
+// E-STOP toggle mechanism
+bool estop_latched = false;           // Latched E-STOP state (toggle on/off)
+bool estop_last_button_state = LOW;   // Previous button state for edge detection
+unsigned long estop_last_press_time = 0;  // Debounce timer
+const unsigned long ESTOP_DEBOUNCE_MS = 50;  // Debounce delay
 
 void setMotor(int pin_rpwm, int pin_lpwm, int pwm_value);
 
@@ -141,7 +157,10 @@ void applyOutputs(bool safety_lock) {
   brush_left_active = brush_left_should;
   brush_right_active = brush_right_should;
 
-  setRelayOutput(RELAY_VACUUM_PIN, vacuum_should);
+  // Vacuum is direct connection (not relay) - LOW=off, HIGH=on
+  digitalWrite(VACUUM_PIN, vacuum_should ? HIGH : LOW);
+  
+  // Others are relays with ACTIVE_HIGH logic
   setRelayOutput(RELAY_BRUSH_MAIN_PIN, brush_main_should);
   setRelayOutput(RELAY_BRUSH_LEFT_PIN, brush_left_should);
   setRelayOutput(RELAY_BRUSH_RIGHT_PIN, brush_right_should);
@@ -172,9 +191,10 @@ void setup() {
   Serial.begin(115200);
 
   // Setup Ultrasonic Trigger pins
+  // Setup Ultrasonic Trigger pins
   pinMode(US_FRONT_TRIG, OUTPUT);
   pinMode(US_FRIGHT_TRIG, OUTPUT);
-  pinMode(US_FLEFT_TRIG, OUTPUT);
+  pinMode(US_FLEFT_TRIG, OUTPUT);   // Re-enabled
   pinMode(US_RIGHT_TRIG, OUTPUT);
   pinMode(US_LEFT_TRIG, OUTPUT);
   pinMode(US_CLEAN_TRIG, OUTPUT);
@@ -183,7 +203,7 @@ void setup() {
   // Setup Ultrasonic Echo pins
   pinMode(US_FRONT_ECHO, INPUT);
   pinMode(US_FRIGHT_ECHO, INPUT);
-  pinMode(US_FLEFT_ECHO, INPUT);
+  pinMode(US_FLEFT_ECHO, INPUT);    // Re-enabled
   pinMode(US_RIGHT_ECHO, INPUT);
   pinMode(US_LEFT_ECHO, INPUT);
   pinMode(US_CLEAN_ECHO, INPUT);
@@ -214,14 +234,14 @@ void setup() {
   pinMode(MOTOR_LEFT_LPWM, OUTPUT);
 
   // Setup safety / auxiliary IO
-  pinMode(ESTOP_MAIN_PIN, INPUT_PULLUP);    // NC switch, use pull-up so LOW when pressed
-  pinMode(FRONT_STOP_PIN, INPUT_PULLUP);    // NO switch with pull-up, will be LOW when pressed
+  pinMode(ESTOP_MAIN_PIN, INPUT_PULLUP);    // NO switch, use pull-up so HIGH when pressed
+  pinMode(FRONT_STOP_PIN, INPUT_PULLUP);    // NO switch with pull-up, will be HIGH when pressed
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(STATUS_LED_PIN, OUTPUT);
-  pinMode(RELAY_VACUUM_PIN, OUTPUT);
-  pinMode(RELAY_BRUSH_MAIN_PIN, OUTPUT);
-  pinMode(RELAY_BRUSH_LEFT_PIN, OUTPUT);
-  pinMode(RELAY_BRUSH_RIGHT_PIN, OUTPUT);
+  pinMode(VACUUM_PIN, OUTPUT);              // Vacuum - direct connection (not relay)
+  pinMode(RELAY_BRUSH_MAIN_PIN, OUTPUT);    // Scrubber relay
+  pinMode(RELAY_BRUSH_LEFT_PIN, OUTPUT);    // Sweeping brush relay
+  pinMode(RELAY_BRUSH_RIGHT_PIN, OUTPUT);   // Water pump relay
   safety_lock_active = false;
   applyOutputs(safety_lock_active);
 
@@ -237,41 +257,77 @@ void setup() {
   if (imu_available) {
     bno.setExtCrystalUse(true);
   }
+
+  // Initialize INA219 current/voltage sensor
+  ina219_available = ina219.begin();
+  if (ina219_available) {
+    // INA219 will measure voltage and current via I2C
+    // Default: 32V, 2A range (auto-calibrated)
+  }
+
+  // Initialize DHT11 temperature sensor
+  dht.begin();
+  dht_available = true;  // DHT11 doesn't have begin() return value
 }
 
 // Read all sensor data and output as pipe-separated sections
 void readAllSensors() {
-  // Read 7 ultrasonic sensors (cm)
+  // Read ultrasonic sensors (cm)
   float us_front = readUltrasonicCm(US_FRONT_TRIG, US_FRONT_ECHO);
   float us_fright = readUltrasonicCm(US_FRIGHT_TRIG, US_FRIGHT_ECHO);
-  float us_fleft = readUltrasonicCm(US_FLEFT_TRIG, US_FLEFT_ECHO);
+  float us_fleft = readUltrasonicCm(US_FLEFT_TRIG, US_FLEFT_ECHO);  // Re-enabled
   float us_right = readUltrasonicCm(US_RIGHT_TRIG, US_RIGHT_ECHO);
   float us_left = readUltrasonicCm(US_LEFT_TRIG, US_LEFT_ECHO);
   float us_clean = readUltrasonicCm(US_CLEAN_TRIG, US_CLEAN_ECHO);
   float us_dirty = readUltrasonicCm(US_DIRTY_TRIG, US_DIRTY_ECHO);
 
-  // Read 4 IR object sensors (0 = object detected, 1 = clear)
-  int ir_fright_obj = digitalRead(IR_FRIGHT_OBJ);
-  int ir_fleft_obj = digitalRead(IR_FLEFT_OBJ);
-  int ir_bright_obj = digitalRead(IR_BRIGHT_OBJ);
-  int ir_bleft_obj = digitalRead(IR_BLEFT_OBJ);
+  // Read 4 IR object sensors
+  // INVERTED: Physical sensors output LOW when object present (Active LOW)
+  // After inversion: 1 = object detected (DANGER), 0 = clear (SAFE)
+  int ir_fright_obj = !digitalRead(IR_FRIGHT_OBJ);
+  int ir_fleft_obj = !digitalRead(IR_FLEFT_OBJ);
+  int ir_bright_obj = !digitalRead(IR_BRIGHT_OBJ);
+  int ir_bleft_obj = !digitalRead(IR_BLEFT_OBJ);
 
-  // Read 4 IR stair sensors (0 = stair/drop detected, 1 = floor)
-  int ir_fright_stair = digitalRead(IR_FRIGHT_STAIR);
-  int ir_fleft_stair = digitalRead(IR_FLEFT_STAIR);
-  int ir_bright_stair = digitalRead(IR_BRIGHT_STAIR);
-  int ir_bleft_stair = digitalRead(IR_BLEFT_STAIR);
+  // Read 4 IR stair sensors
+  // INVERTED: Physical sensors output LOW when floor detected (Active LOW)
+  // After inversion: 1 = floor detected (SAFE), 0 = no floor/stair (DANGER)
+  int ir_fright_stair = !digitalRead(IR_FRIGHT_STAIR);
+  int ir_fleft_stair = !digitalRead(IR_FLEFT_STAIR);
+  int ir_bright_stair = !digitalRead(IR_BRIGHT_STAIR);
+  int ir_bleft_stair = !digitalRead(IR_BLEFT_STAIR);
 
   // Read emergency/bumper switches
-  // Pin 22 (ESTOP_MAIN_PIN): NC switch - reads HIGH (1) when safe, LOW (0) when triggered
+  // Pin 22 (ESTOP_MAIN_PIN): NO switch - reads LOW (0) when safe, HIGH (1) when pressed
   // Pin 24 (FRONT_STOP_PIN): NO switch - reads LOW (0) when safe, HIGH (1) when pressed
   int pin22_state = digitalRead(ESTOP_MAIN_PIN);
   int pin24_state = digitalRead(FRONT_STOP_PIN);
-  bool estop_main_active = (pin22_state == LOW);    // NC: LOW when emergency triggered
+  
+  // E-STOP toggle logic: Press once to LOCK, press again to UNLOCK
+  if (pin22_state == HIGH && estop_last_button_state == LOW) {
+    // Rising edge detected (button just pressed)
+    if (millis() - estop_last_press_time > ESTOP_DEBOUNCE_MS) {
+      // Toggle the latched state
+      estop_latched = !estop_latched;
+      estop_last_press_time = millis();
+    }
+  }
+  estop_last_button_state = pin22_state;
+  
+  // Front bumper remains immediate (not latched)
   bool front_stop_active = (pin24_state == HIGH);   // NO: HIGH when bumper pressed
 
-  // Safety lock is active if ANY emergency condition is true
-  safety_lock_active = estop_main_active || front_stop_active;
+  // Check IR sensors for hazards
+  // Object detection: 1 = object detected (DANGER), 0 = clear
+  bool object_detected = (ir_fright_obj == 1) || (ir_fleft_obj == 1) || 
+                         (ir_bright_obj == 1) || (ir_bleft_obj == 1);
+  
+  // Stair detection: 0 = stair/drop detected (DANGER), 1 = floor
+  bool stair_detected = (ir_fright_stair == 0) || (ir_fleft_stair == 0) || 
+                        (ir_bright_stair == 0) || (ir_bleft_stair == 0);
+
+  // Safety lock is active if: E-STOP latched OR any other emergency condition
+  safety_lock_active = estop_latched || front_stop_active || object_detected || stair_detected;
   if (!safety_lock_active) {
     if (safety_lock_released_at == 0) {
       safety_lock_released_at = millis();
@@ -297,10 +353,34 @@ void readAllSensors() {
   enc_right = encoder_right_count;
   interrupts();
 
-  // Read battery telemetry
-  int batt_voltage_raw = readAnalogAverage(BATTERY_VOLT_PIN);
-  int batt_current_raw = readAnalogAverage(BATTERY_CURR_PIN);
-  int batt_temp_raw = readAnalogAverage(BATTERY_TEMP_PIN);
+  // Read battery telemetry from analog pins and DHT11
+  float bus_voltage = 0.0;    // Voltage in volts
+  float current_mA = 0.0;      // Current in mA
+  float temperature_C = 0.0;   // Temperature in Celsius
+  
+  // Read battery voltage from A0 (0-1023 ADC, assuming voltage divider)
+  // Calibrated for 25.8V max: voltage = (ADC / 1023) * 25.8V
+  int voltage_adc = analogRead(BATTERY_VOLTAGE_PIN);
+  bus_voltage = (voltage_adc / 1023.0) * 25.8;
+  
+  // Read battery current from A1 (0-1023 ADC, assuming current sensor)
+  // Assuming 0-10A range: current = (ADC / 1023) * 10A = 10000mA
+  int current_adc = analogRead(BATTERY_CURRENT_PIN);
+  current_mA = (current_adc / 1023.0) * 10000.0;
+  
+  if (dht_available) {
+    temperature_C = dht.readTemperature();      // Temperature in Celsius
+    if (isnan(temperature_C)) {
+      temperature_C = 0.0;  // Handle NaN from DHT11
+    }
+  }
+  
+  // Convert to "raw" values for ROS node compatibility
+  // ROS node expects: voltage_raw * 0.0254 = volts, current_raw * 0.001 = amps
+  // So: voltage_raw = volts / 0.0254, current_raw = (mA/1000) / 0.001 = mA
+  int batt_voltage_raw = (int)(bus_voltage / 0.0254);
+  int batt_current_raw = (int)(current_mA);  // Already in mA, matches 0.001 scale
+  int batt_temp_raw = (int)(temperature_C / 0.1);  // Scale to match 0.1 degC per count
 
   // Read IMU data if available
   bool imu_has_sample = false;
@@ -356,7 +436,8 @@ void readAllSensors() {
   Serial.print("|ESTOP:");
   Serial.print(pin22_state); Serial.print(",");
   Serial.print(pin24_state); Serial.print(",");
-  Serial.print(safety_lock_active ? 1 : 0);
+  Serial.print(safety_lock_active ? 1 : 0); Serial.print(",");
+  Serial.print(estop_latched ? 1 : 0);  // Add latched state for debugging
 
   Serial.print("|BAT:");
   Serial.print(batt_voltage_raw); Serial.print(",");
@@ -388,6 +469,11 @@ void readAllSensors() {
   Serial.print(brush_main_active ? 1 : 0); Serial.print(",");
   Serial.print(brush_left_active ? 1 : 0); Serial.print(",");
   Serial.print(brush_right_active ? 1 : 0);
+
+  Serial.print("|ESTOP:");
+  Serial.print(estop_latched ? 1 : 0); Serial.print(",");
+  Serial.print(digitalRead(FRONT_STOP_PIN)); Serial.print(",");
+  Serial.print(safety_lock_active ? 1 : 0);
 
   Serial.println();
 }
@@ -460,6 +546,49 @@ void processCommand(String cmd) {
   else if (cmd.startsWith("BRR:")) {
     brush_right_requested = (cmd.substring(4).toInt() != 0);
     applyOutputs(safety_lock_active);
+  }
+  else if (cmd.startsWith("RELAY:")) {
+    // RELAY:X,Y -> map to vacuum/brush_main/brush_left/brush_right
+    // X = 1..4  , Y = 0|1
+    String data = cmd.substring(6); // remove "RELAY:"
+    int comma = data.indexOf(',');
+    if (comma > 0) {
+      int relayNum = data.substring(0, comma).toInt();
+      int state = data.substring(comma + 1).toInt();
+      bool on = (state != 0);
+
+      switch (relayNum) {
+        case 1: // Vacuum Pump (direct connection, not relay)
+          vacuum_requested = on;
+          break;
+        case 2: // Scrubber (relay on pin 30)
+          brush_main_requested = on;
+          break;
+        case 3: // Sweeping Brush (relay on pin 27)
+          brush_left_requested = on;
+          break;
+        case 4: // Water Pump (relay on pin 29)
+          brush_right_requested = on;
+          break;
+        default:
+          // invalid relay number
+          break;
+      }
+      applyOutputs(safety_lock_active);
+      // Optionally echo acknowledgement
+      Serial.print("OK:RELAY:");
+      Serial.print(relayNum);
+      Serial.print(",");
+      Serial.println(state);
+    }
+  }
+  else if (cmd.startsWith("ESTOP:")) {
+    // ESTOP:0 = release, ESTOP:1 = engage
+    String data = cmd.substring(6);
+    int state = data.toInt();
+    estop_latched = (state != 0);
+    Serial.print("OK:ESTOP:");
+    Serial.println(estop_latched ? 1 : 0);
   }
 }
 

@@ -1,0 +1,26 @@
+[console_scripts]
+advanced_autonomous_cleaner = robot_sensors.advanced_autonomous_cleaner:main
+autonomous_cleaner_node = robot_sensors.autonomous_cleaner_node:main
+buzzer_controller = robot_sensors.buzzer_controller:main
+cleaning_controller = robot_sensors.cleaning_controller:main
+control_dashboard = robot_sensors.control_dashboard:main
+coverage_path_planner = robot_sensors.coverage_path_planner:main
+enhanced_dashboard = robot_sensors.enhanced_dashboard:main
+enhanced_smart_cleaner = robot_sensors.enhanced_smart_cleaner:main
+industry_obstacle_avoidance = robot_sensors.industry_obstacle_avoidance:main
+motor_controller_node = robot_sensors.motor_controller_node:main
+multi_sensor_node = robot_sensors.multi_sensor_node:main
+obstacle_avoidance_node = robot_sensors.obstacle_avoidance_node:main
+odometry_node = robot_sensors.odometry_node:main
+odometry_publisher = robot_sensors.odometry_publisher:main
+professional_cleaner = robot_sensors.professional_cleaner:main
+robot_tf_publisher = robot_sensors.robot_tf_publisher:main
+safety_monitor = robot_sensors.safety_monitor:main
+sensor_dashboard = robot_sensors.sensor_dashboard:main
+serial_range_node = robot_sensors.serial_range_node:main
+simple_map_publisher = robot_sensors.simple_map_publisher:main
+simple_robust_cleaner = robot_sensors.simple_robust_cleaner:main
+smart_cleaner_node = robot_sensors.smart_cleaner_node:main
+wall_follow_cleaner = robot_sensors.wall_follow_cleaner:main
+web_dashboard = robot_sensors.web_dashboard:main
+

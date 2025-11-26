@@ -1,0 +1,6 @@
+flask
+flask-cors
+setuptools
+
+[test]
+pytest
