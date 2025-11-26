@@ -7,13 +7,9 @@ import type {
   UltrasonicSensors,
   IRSensors,
   IMU,
+  CleaningStatus,
   Twist
 } from '../types/ros';
-
-const DEFAULT_ROSBRIDGE_URL =
-  (import.meta.env.VITE_ROSBRIDGE_URL && import.meta.env.VITE_ROSBRIDGE_URL.trim() !== '')
-    ? import.meta.env.VITE_ROSBRIDGE_URL
-    : 'ws://192.168.163.134:9090';
 
 // ROS Bridge Connection Manager
 class ROSBridge {
@@ -21,7 +17,7 @@ class ROSBridge {
   private reconnectInterval: NodeJS.Timeout | null = null;
   private connectionCallbacks: ((connected: boolean) => void)[] = [];
   
-  constructor(private url: string = DEFAULT_ROSBRIDGE_URL) {}
+  constructor(private url: string = 'ws://localhost:9090') {}
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -224,218 +220,142 @@ export function subscribeUltrasonic(callback: (sensors: UltrasonicSensors) => vo
 }
 
 export function subscribeIR(callback: (sensors: IRSensors) => void) {
-  const aggregatedData: IRSensors = {
-    header: {
-      stamp: { sec: 0, nanosec: 0 },
-      frame_id: 'ir/aggregate',
-    },
-    obstacle_front_left: false,
-    obstacle_front_right: false,
-    obstacle_back_left: false,
-    obstacle_back_right: false,
-    cliff_front_left: false,
-    cliff_front_right: false,
-    cliff_back_left: false,
-    cliff_back_right: false,
+  // Subscribe to individual IR Bool topics and aggregate them
+  const aggregatedData: any = {
+    front_left_object: false,
+    front_left_stair: false,
+    front_right_object: false,
+    front_right_stair: false,
+    back_left_object: false,
+    back_left_stair: false,
+    back_right_object: false,
+    back_right_stair: false
   };
 
-  const emitUpdate = () => callback({ ...aggregatedData });
+  const frontLeftObjTopic = rosbridge.subscribeTo<any>('/ir/obstacle/front_left/object', 'std_msgs/Bool', (msg) => {
+    aggregatedData.front_left_object = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  const frontLeftObjTopic = rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/front_left/object',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.obstacle_front_left = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/stair/front_left', 'std_msgs/Bool', (msg) => {
+    aggregatedData.front_left_stair = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/front_right/object',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.obstacle_front_right = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/obstacle/front_right/object', 'std_msgs/Bool', (msg) => {
+    aggregatedData.front_right_object = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/back_left/object',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.obstacle_back_left = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/stair/front_right', 'std_msgs/Bool', (msg) => {
+    aggregatedData.front_right_stair = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/back_right/object',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.obstacle_back_right = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/obstacle/back_left/object', 'std_msgs/Bool', (msg) => {
+    aggregatedData.back_left_object = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/front_left/stair',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.cliff_front_left = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/stair/back_left', 'std_msgs/Bool', (msg) => {
+    aggregatedData.back_left_stair = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/front_right/stair',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.cliff_front_right = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/obstacle/back_right/object', 'std_msgs/Bool', (msg) => {
+    aggregatedData.back_right_object = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/back_left/stair',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.cliff_back_left = msg.data;
-      emitUpdate();
-    },
-    100
-  );
+  rosbridge.subscribeTo<any>('/ir/stair/back_right', 'std_msgs/Bool', (msg) => {
+    aggregatedData.back_right_stair = msg.data;
+    callback(aggregatedData);
+  }, 100);
 
-  rosbridge.subscribeTo<{ data: boolean }>(
-    '/ir/back_right/stair',
-    'std_msgs/Bool',
-    (msg) => {
-      aggregatedData.cliff_back_right = msg.data;
-      emitUpdate();
-    },
-    100
-  );
-
-  return frontLeftObjTopic;
+  return frontLeftObjTopic; // Return one topic for unsubscribe
 }
 
 export function subscribeIMU(callback: (imu: IMU) => void) {
   return rosbridge.subscribeTo<IMU>('/imu/data', 'sensor_msgs/Imu', callback, 100);
 }
 
-export function subscribeRelayStatus(callback: (relay: number, state: boolean) => void) {
-  return rosbridge.subscribeTo<{ data: string }>(
-    '/relay/status',
+export function subscribeCleaningStatus(callback: (status: CleaningStatus) => void) {
+  return rosbridge.subscribeTo<CleaningStatus>(
+    '/cleaning_status',
     'std_msgs/String',
-    (msg) => {
-      if (!msg?.data) return;
-      const parts = msg.data.split(',');
-      if (parts.length < 2) return;
-      const relay = parseInt(parts[0], 10);
-      const state = parseInt(parts[1], 10);
-      if (!Number.isFinite(relay) || !Number.isFinite(state)) return;
-      callback(relay, state === 1);
-    },
+    callback,
     200
   );
 }
 
-export function subscribeEncoders(callback: (left: number, right: number) => void) {
-  const encoders = { left: 0, right: 0 };
-  const emitUpdate = () => callback(encoders.left, encoders.right);
-
-  const leftTopic = rosbridge.subscribeTo<{ data: number }>(
-    '/encoder/left',
-    'std_msgs/Int32',
-    (msg) => {
-      encoders.left = msg.data ?? 0;
-      emitUpdate();
-    },
-    100
-  );
-
-  rosbridge.subscribeTo<{ data: number }>(
-    '/encoder/right',
-    'std_msgs/Int32',
-    (msg) => {
-      encoders.right = msg.data ?? 0;
-      emitUpdate();
-    },
-    100
-  );
-
-  return leftTopic;
-}
-
-export function subscribeWaterLevels(callback: (clean: number, dirty: number) => void) {
-  const levels = { clean: 0, dirty: 0 };
-  const emitUpdate = () => callback(levels.clean, levels.dirty);
-
-  const cleanTopic = rosbridge.subscribeTo<{ range: number }>(
-    '/water_level/clean',
-    'sensor_msgs/Range',
-    (msg) => {
-      if (typeof msg?.range === 'number') {
-        levels.clean = msg.range * 100; // convert meters to cm
-        emitUpdate();
-      }
-    },
-    500
-  );
-
-  rosbridge.subscribeTo<{ range: number }>(
-    '/water_level/dirty',
-    'sensor_msgs/Range',
-    (msg) => {
-      if (typeof msg?.range === 'number') {
-        levels.dirty = msg.range * 100;
-        emitUpdate();
-      }
-    },
-    500
-  );
-
-  return cleanTopic;
-}
-
+// Publishing helpers
 export function publishVelocity(linear: number, angular: number) {
   const twist: Twist = {
     linear: { x: linear, y: 0, z: 0 },
     angular: { x: 0, y: 0, z: angular },
   };
-  rosbridge.publishTo<Twist>('/cmd_vel', 'geometry_msgs/Twist', twist);
+  rosbridge.publishTo('/cmd_vel', 'geometry_msgs/Twist', twist);
+}
+
+export function publishCleaningCommand(command: 'start' | 'stop' | 'pause') {
+  // Send to both cleaning systems for compatibility
+  // Wall Follow Cleaner uses /cleaning_command
+  rosbridge.publishTo('/cleaning_command', 'std_msgs/String', { data: command });
+  
+  // Advanced Autonomous Cleaner uses /autonomous/enable
+  const enableAutonomous = command === 'start';
+  rosbridge.publishTo('/autonomous/enable', 'std_msgs/Bool', { data: enableAutonomous });
+}
+
+export function publishEmergencyStop(stop: boolean) {
+  rosbridge.publishTo('/emergency_stop', 'std_msgs/Bool', { data: stop });
 }
 
 export function publishRelayCommand(relay: number, state: boolean) {
-  const payload = `${relay},${state ? 1 : 0}`;
-  rosbridge.publishTo<{ data: string }>(
-    '/relay/command',
-    'std_msgs/String',
-    { data: payload }
-  );
+  // relay: 1=Vacuum Pump, 2=Scrubber, 3=Sweeping Brush, 4=Water Pump
+  const command = `${relay},${state ? 1 : 0}`;
+  rosbridge.publishTo('/relay/command', 'std_msgs/String', { data: command });
 }
 
-export function publishEmergencyStop(active: boolean) {
-  rosbridge.publishTo<{ data: boolean }>(
-    '/emergency_stop',
-    'std_msgs/Bool',
-    { data: active }
-  );
+export function subscribeRelayStatus(callback: (relay: number, state: boolean) => void) {
+  return rosbridge.subscribeTo<{ data: string }>('/relay/status', 'std_msgs/String', (msg) => {
+    const parts = msg.data.split(',');
+    if (parts.length === 2) {
+      const relay = parseInt(parts[0]);
+      const state = parseInt(parts[1]) === 1;
+      callback(relay, state);
+    }
+  });
 }
 
-type CleaningCommand = 'start' | 'pause' | 'stop';
+// Subscribe to encoder data
+export function subscribeEncoders(callback: (left: number, right: number) => void) {
+  const encoderData = { left: 0, right: 0 };
+  
+  rosbridge.subscribeTo<{ data: number }>('/encoder/left', 'std_msgs/Int32', (msg) => {
+    encoderData.left = msg.data;
+    callback(encoderData.left, encoderData.right);
+  }, 100);
+  
+  return rosbridge.subscribeTo<{ data: number }>('/encoder/right', 'std_msgs/Int32', (msg) => {
+    encoderData.right = msg.data;
+    callback(encoderData.left, encoderData.right);
+  }, 100);
+}
 
-export function publishCleaningCommand(command: CleaningCommand) {
-  rosbridge.publishTo<{ data: string }>(
-    '/cleaning_command',
-    'std_msgs/String',
-    { data: command }
-  );
+// Subscribe to water level sensors
+export function subscribeWaterLevels(callback: (clean: number, dirty: number) => void) {
+  const waterData = { clean: 0, dirty: 0 };
+  
+  rosbridge.subscribeTo<{ range: number }>('/water_level/clean', 'sensor_msgs/Range', (msg) => {
+    waterData.clean = msg.range * 100; // Convert to percentage or cm
+    callback(waterData.clean, waterData.dirty);
+  }, 500);
+  
+  return rosbridge.subscribeTo<{ range: number }>('/water_level/dirty', 'sensor_msgs/Range', (msg) => {
+    waterData.dirty = msg.range * 100; // Convert to percentage or cm
+    callback(waterData.clean, waterData.dirty);
+  }, 500);
 }
 
 export default rosbridge;

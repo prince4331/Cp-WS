@@ -27,8 +27,7 @@ Date: November 16, 2025
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan, Range, Imu
+from sensor_msgs.msg import LaserScan, Range
 from std_msgs.msg import Bool, String
 import numpy as np
 import math
@@ -67,13 +66,6 @@ class ObstacleZone:
     threat_level: ThreatLevel
     max_speed: float      # m/s
     max_angular: float    # rad/s
-
-
-class NavState(Enum):
-    IDLE = 0
-    COVERAGE = 1
-    AVOIDANCE = 2
-    RETURN_HOME = 3
 
 
 class IndustryObstacleAvoidance(Node):
@@ -128,15 +120,6 @@ class IndustryObstacleAvoidance(Node):
         # Autonomous control state (start, pause, stop)
         self.autonomous_enabled = False  # Start disabled, wait for dashboard command
         self.autonomous_paused = False   # Pause state (enabled but temporarily stopped)
-        self.nav_state = NavState.IDLE
-        self.start_pose = None
-        self.current_pose = None
-        self.last_pose = None
-        self.distance_covered = 0.0
-        self.coverage_target = 25.0  # meters to cover before returning
-        self.return_complete = False
-        self.imu_yaw = 0.0
-        self.target_heading = None
         
         self.sensor_data: Dict[str, SensorReading] = {}
         self.obstacle_map: List[SensorReading] = []
@@ -224,14 +207,6 @@ class IndustryObstacleAvoidance(Node):
             Bool, 'ir/stair/back_right',
             lambda msg: self.cliff_callback(msg, 'back_right'), 10
         )
-
-        # Odometry + IMU for precise heading/pose
-        self.odom_sub = self.create_subscription(
-            Odometry, 'odom', self.odom_callback, 20
-        )
-        self.imu_sub = self.create_subscription(
-            Imu, 'imu/data', self.imu_callback, 20
-        )
         
         # Autonomous control enable/disable
         self.autonomous_enable_sub = self.create_subscription(
@@ -264,17 +239,10 @@ class IndustryObstacleAvoidance(Node):
         if msg.data and not self.autonomous_enabled:
             self.autonomous_enabled = True
             self.autonomous_paused = False
-            self.nav_state = NavState.COVERAGE
-            self.start_pose = self.current_pose
-            self.distance_covered = 0.0
-            self.return_complete = False
-            if self.current_pose:
-                self.target_heading = self.current_pose['theta']
             self.get_logger().info('🤖 Autonomous navigation ENABLED')
         elif not msg.data and self.autonomous_enabled:
             self.autonomous_enabled = False
             self.autonomous_paused = False
-            self.nav_state = NavState.IDLE
             # Send stop command when disabled
             stop_cmd = Twist()
             self.cmd_vel_pub.publish(stop_cmd)
@@ -291,17 +259,10 @@ class IndustryObstacleAvoidance(Node):
             if self.autonomous_paused:
                 self.autonomous_paused = False
                 self.get_logger().info('▶️  Autonomous navigation RESUMED')
-            self.nav_state = NavState.COVERAGE
-            self.start_pose = self.current_pose
-            self.distance_covered = 0.0
-            self.return_complete = False
-            if self.current_pose:
-                self.target_heading = self.current_pose['theta']
         
         elif command == 'pause':
             if self.autonomous_enabled and not self.autonomous_paused:
                 self.autonomous_paused = True
-                self.nav_state = NavState.IDLE
                 # Send stop command when paused
                 stop_cmd = Twist()
                 self.cmd_vel_pub.publish(stop_cmd)
@@ -311,7 +272,6 @@ class IndustryObstacleAvoidance(Node):
             if self.autonomous_enabled:
                 self.autonomous_enabled = False
                 self.autonomous_paused = False
-                self.nav_state = NavState.RETURN_HOME if self.start_pose else NavState.IDLE
                 # Send stop command
                 stop_cmd = Twist()
                 self.cmd_vel_pub.publish(stop_cmd)
@@ -442,16 +402,6 @@ class IndustryObstacleAvoidance(Node):
         if self.cliff_detected:
             self.emergency_stop()
             return
-
-        if self.nav_state == NavState.RETURN_HOME and self.start_pose:
-            cmd = self.navigate_to_pose(self.start_pose)
-            self.cmd_vel_pub.publish(cmd)
-            if self.is_at_pose(self.start_pose):
-                self.get_logger().info('🏁 Returned to initial pose. Switching to manual.')
-                self.nav_state = NavState.IDLE
-                self.autonomous_enabled = False
-                self.return_complete = True
-            return
         
         # Priority 2: Analyze all sensors and assess threat
         threat_level, closest_obstacle = self.assess_threat_level()
@@ -462,15 +412,10 @@ class IndustryObstacleAvoidance(Node):
             self.emergency_stop()
             return
         
-        # Determine command based on state
-        if threat_level.value >= ThreatLevel.WARNING.value:
-            self.nav_state = NavState.AVOIDANCE
-            safe_cmd = self.compute_safe_velocity(threat_level, closest_obstacle)
-        else:
-            if self.nav_state != NavState.COVERAGE:
-                self.nav_state = NavState.COVERAGE
-            safe_cmd = self.coverage_drive_command()
+        # Priority 4: Determine safe navigation command
+        safe_cmd = self.compute_safe_velocity(threat_level, closest_obstacle)
         
+        # Priority 5: Publish command
         self.cmd_vel_pub.publish(safe_cmd)
         
         # Publish threat level
@@ -564,48 +509,6 @@ class IndustryObstacleAvoidance(Node):
             cmd.angular.z = -np.sign(angle) * zone.max_angular * 0.7
         
         return cmd
-
-    def coverage_drive_command(self) -> Twist:
-        """Drive straight segments with IMU+encoder corrections."""
-        cmd = Twist()
-        base_speed = 0.25
-        heading = self.imu_yaw if self.target_heading is None else self.target_heading
-        error = normalize_angle(heading - self.imu_yaw)
-        cmd.linear.x = base_speed
-        cmd.angular.z = 0.8 * error
-
-        if self.distance_covered >= self.coverage_target and not self.return_complete:
-            self.get_logger().info('📍 Coverage target met, returning to start pose')
-            self.nav_state = NavState.RETURN_HOME
-        return cmd
-
-    def navigate_to_pose(self, target_pose: Dict[str, float]) -> Twist:
-        """Simple go-to-pose using odometry + IMU."""
-        cmd = Twist()
-        if not self.current_pose:
-            return cmd
-
-        dx = target_pose['x'] - self.current_pose['x']
-        dy = target_pose['y'] - self.current_pose['y']
-        distance = math.hypot(dx, dy)
-        heading_target = math.atan2(dy, dx)
-        heading_error = normalize_angle(heading_target - self.imu_yaw)
-
-        if distance > 0.1:
-            cmd.linear.x = min(0.2, distance * 0.5)
-            cmd.angular.z = max(-0.6, min(0.6, heading_error * 1.2))
-        else:
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.0
-
-        return cmd
-
-    def is_at_pose(self, pose: Dict[str, float], tolerance: float = 0.15) -> bool:
-        if not self.current_pose:
-            return False
-        dx = pose['x'] - self.current_pose['x']
-        dy = pose['y'] - self.current_pose['y']
-        return math.hypot(dx, dy) <= tolerance
     
     def emergency_stop(self):
         """Immediate stop for emergency situations"""
@@ -637,35 +540,6 @@ class IndustryObstacleAvoidance(Node):
                 
                 if self.sensor_failure_count[sensor] == 1:
                     self.get_logger().warning(f'⚠️ Sensor timeout: {sensor}')
-
-    # ==================== POSE / IMU CALLBACKS ====================
-
-    def odom_callback(self, msg: Odometry):
-        """Track pose from wheel odometry."""
-        x = msg.pose.pose.position.x
-        y = msg.pose.pose.position.y
-        orientation = msg.pose.pose.orientation
-        yaw = math.atan2(
-            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
-            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z)
-        )
-        self.current_pose = {'x': x, 'y': y, 'theta': yaw}
-        if self.last_pose:
-            dx = x - self.last_pose['x']
-            dy = y - self.last_pose['y']
-            self.distance_covered += math.hypot(dx, dy)
-        self.last_pose = {'x': x, 'y': y}
-
-    def imu_callback(self, msg: Imu):
-        """Use IMU for absolute heading."""
-        orientation = msg.orientation
-        yaw = math.atan2(
-            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
-            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z)
-        )
-        self.imu_yaw = yaw
-        if self.target_heading is None:
-            self.target_heading = yaw
 
 
 def main(args=None):
